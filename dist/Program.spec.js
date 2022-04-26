@@ -1,0 +1,2143 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const chai_1 = require("chai");
+const pick = require("object.pick");
+const sinonImport = require("sinon");
+const vscode_languageserver_1 = require("vscode-languageserver");
+const fsExtra = require("fs-extra");
+const DiagnosticMessages_1 = require("./DiagnosticMessages");
+const Program_1 = require("./Program");
+const util_1 = require("./util");
+const vscode_uri_1 = require("vscode-uri");
+const PluginInterface_1 = require("./PluginInterface");
+const Statement_1 = require("./parser/Statement");
+const testHelpers_spec_1 = require("./testHelpers.spec");
+const assert_1 = require("assert");
+const Logger_1 = require("./Logger");
+const creators_1 = require("./astUtils/creators");
+const visitors_1 = require("./astUtils/visitors");
+const reflection_1 = require("./astUtils/reflection");
+const TokenKind_1 = require("./lexer/TokenKind");
+let sinon = sinonImport.createSandbox();
+let tmpPath = (0, util_1.standardizePath) `${process.cwd()}/.tmp`;
+let rootDir = (0, util_1.standardizePath) `${tmpPath}/rootDir`;
+let stagingFolderPath = (0, util_1.standardizePath) `${tmpPath}/staging`;
+describe('Program', () => {
+    let program;
+    beforeEach(() => {
+        fsExtra.ensureDirSync(tmpPath);
+        fsExtra.emptyDirSync(tmpPath);
+        program = new Program_1.Program({
+            rootDir: rootDir,
+            stagingFolderPath: stagingFolderPath
+        });
+        program.createSourceScope(); //ensure source scope is created
+    });
+    afterEach(() => {
+        sinon.restore();
+        fsExtra.ensureDirSync(tmpPath);
+        fsExtra.emptyDirSync(tmpPath);
+        program.dispose();
+    });
+    describe('global scope', () => {
+        it('returns all callables when asked', () => {
+            (0, chai_1.expect)(program.globalScope.getAllCallables().length).to.be.greaterThan(0);
+        });
+        it('validate gets called and does nothing', () => {
+            (0, chai_1.expect)(program.globalScope.validate()).to.eql(undefined);
+        });
+    });
+    describe('addFile', () => {
+        it('adds various files to `pkgMap`', () => {
+            program.setFile('source/main.brs', '');
+            (0, chai_1.expect)(program['pkgMap']).to.have.property((0, util_1.standardizePath) `source/main.brs`);
+            program.setFile('source/main.bs', '');
+            (0, chai_1.expect)(program['pkgMap']).to.have.property((0, util_1.standardizePath) `source/main.bs`);
+            program.setFile('components/comp1.xml', '');
+            (0, chai_1.expect)(program['pkgMap']).to.have.property((0, util_1.standardizePath) `components/comp1.xml`);
+        });
+        it('does not crash when given a totally bogus file', () => {
+            program.setFile({
+                src: `${rootDir}/source/main.brs`,
+                dest: 'source/main.brs'
+            }, `class Animalpublic name as stringpublic function walk()end functionend class`);
+            //if the program didn't get stuck in an infinite loop, this test passes
+        });
+        it('only parses xml files as components when file is found within the "components" folder', () => {
+            (0, chai_1.expect)(Object.keys(program.files).length).to.equal(0);
+            program.setFile({
+                src: (0, util_1.standardizePath) `${rootDir}/components/comp1.xml`,
+                dest: util_1.util.pathSepNormalize(`components/comp1.xml`)
+            }, '');
+            (0, chai_1.expect)(Object.keys(program.files).length).to.equal(1);
+            program.setFile({
+                src: (0, util_1.standardizePath) `${rootDir}/notComponents/comp1.xml`,
+                dest: util_1.util.pathSepNormalize(`notComponents/comp1.xml`)
+            }, '');
+            (0, chai_1.expect)(Object.keys(program.files).length).to.equal(1);
+            program.setFile({
+                src: (0, util_1.standardizePath) `${rootDir}/componentsExtra/comp1.xml`,
+                dest: util_1.util.pathSepNormalize(`componentsExtra/comp1.xml`)
+            }, '');
+            (0, chai_1.expect)(Object.keys(program.files).length).to.equal(1);
+        });
+        it('supports empty statements for transpile', async () => {
+            const file = program.setFile('source/main.bs', `
+                sub main()
+                    m.logError()
+                    'some comment
+                end sub
+            `);
+            file.parser.ast.statements[0].func.body.statements[0] = new Statement_1.EmptyStatement();
+            await program.transpile([{ src: file.pathAbsolute, dest: file.pkgPath }], tmpPath);
+        });
+        it('works with different cwd', () => {
+            let projectDir = (0, util_1.standardizePath) `${tmpPath}/project2`;
+            fsExtra.ensureDirSync(projectDir);
+            program = new Program_1.Program({ cwd: projectDir });
+            program.setFile({ src: 'source/lib.brs', dest: 'source/lib.brs' }, 'function main()\n    print "hello world"\nend function');
+            // await program.reloadFile('source/lib.brs', `'this is a comment`);
+            //if we made it to here, nothing exploded, so the test passes
+        });
+        it(`adds files in the source folder to the 'source' scope`, () => {
+            (0, chai_1.expect)(program.getScopeByName('source')).to.exist;
+            //no files in source scope
+            (0, chai_1.expect)(program.getScopeByName('source').getOwnFiles().length).to.equal(0);
+            let mainPath = (0, util_1.standardizePath) `${rootDir}/source/main.brs`;
+            //add a new source file
+            program.setFile({ src: mainPath, dest: 'source/main.brs' }, '');
+            //file should be in source scope now
+            (0, chai_1.expect)(program.getScopeByName('source').getFile(mainPath)).to.exist;
+            //add an unreferenced file from the components folder
+            program.setFile({ src: `${rootDir}/components/component1/component1.brs`, dest: 'components/component1/component1.brs' }, '');
+            //source scope should have the same number of files
+            (0, chai_1.expect)(program.getScopeByName('source').getFile(mainPath)).to.exist;
+            (0, chai_1.expect)(program.getScopeByName('source').getFile(`${rootDir}/components/component1/component1.brs`)).not.to.exist;
+        });
+        it('normalizes file paths', () => {
+            let filePath = `${rootDir}/source\\main.brs`;
+            program.setFile({ src: filePath, dest: 'source/main.brs' }, '');
+            (0, chai_1.expect)(program.getScopeByName('source').getFile(filePath)).to.exist;
+            //shouldn't throw an exception because it will find the correct path after normalizing the above path and remove it
+            try {
+                program.removeFile(filePath);
+                //no error
+            }
+            catch (e) {
+                chai_1.assert.fail(null, null, 'Should not have thrown exception');
+            }
+        });
+        it('creates a scope for every component xml file', () => {
+            // let componentPath = path.resolve(`${rootDir}/components/component1.xml`);
+            // await program.loadOrReloadFile('components', '')
+        });
+        it(`emits events for scope and file creation`, () => {
+            const beforeProgramValidate = sinon.spy();
+            const afterProgramValidate = sinon.spy();
+            const afterScopeCreate = sinon.spy();
+            const beforeScopeValidate = sinon.spy();
+            const afterScopeValidate = sinon.spy();
+            const beforeFileParse = sinon.spy();
+            const afterFileParse = sinon.spy();
+            const afterFileValidate = sinon.spy();
+            program.plugins = new PluginInterface_1.default([{
+                    name: 'emits events for scope and file creation',
+                    beforeProgramValidate: beforeProgramValidate,
+                    afterProgramValidate: afterProgramValidate,
+                    afterScopeCreate: afterScopeCreate,
+                    beforeScopeValidate: beforeScopeValidate,
+                    afterScopeValidate: afterScopeValidate,
+                    beforeFileParse: beforeFileParse,
+                    afterFileParse: afterFileParse,
+                    afterFileValidate: afterFileValidate
+                }], new Logger_1.Logger());
+            let mainPath = (0, util_1.standardizePath) `${rootDir}/source/main.brs`;
+            //add a new source file
+            program.setFile({ src: mainPath, dest: 'source/main.brs' }, '');
+            //add a component file
+            program.setFile({ src: `${rootDir}/components/component1.xml`, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/lib.brs" />
+                </component>`);
+            program.validate();
+            //program events
+            (0, chai_1.expect)(beforeProgramValidate.callCount).to.equal(1);
+            (0, chai_1.expect)(afterProgramValidate.callCount).to.equal(1);
+            //scope events
+            //(we get component scope event only because source is created in beforeEach)
+            (0, chai_1.expect)(afterScopeCreate.callCount).to.equal(1);
+            (0, chai_1.expect)(beforeScopeValidate.callCount).to.equal(2);
+            (0, chai_1.expect)(afterScopeValidate.callCount).to.equal(2);
+            //file events
+            (0, chai_1.expect)(beforeFileParse.callCount).to.equal(2);
+            (0, chai_1.expect)(afterFileParse.callCount).to.equal(2);
+            (0, chai_1.expect)(afterFileValidate.callCount).to.equal(2);
+        });
+    });
+    describe('validate', () => {
+        it('retains expressions after validate', () => {
+            const file = program.setFile('source/main.bs', `
+                sub test()
+                    print a.b.c
+                end sub
+            `);
+            //disable the plugins
+            (0, chai_1.expect)(file.parser.references.expressions).to.be.lengthOf(1);
+            program.validate();
+            (0, chai_1.expect)(file.parser.references.expressions).to.be.lengthOf(1);
+        });
+        it('catches duplicate XML component names', () => {
+            //add 2 components which both reference the same errored file
+            program.setFile({ src: `${rootDir}/components/component1.xml`, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/component2.xml`, dest: 'components/component2.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [Object.assign(Object.assign({}, DiagnosticMessages_1.DiagnosticMessages.duplicateComponentName('Component1')), { range: vscode_languageserver_1.Range.create(1, 17, 1, 27), relatedInformation: [{
+                            location: vscode_languageserver_1.Location.create(vscode_uri_1.URI.file((0, util_1.standardizePath) `${rootDir}/components/component1.xml`).toString(), vscode_languageserver_1.Range.create(1, 17, 1, 27)),
+                            message: 'Also defined here'
+                        }] }), Object.assign(Object.assign({}, DiagnosticMessages_1.DiagnosticMessages.duplicateComponentName('Component1')), { range: vscode_languageserver_1.Range.create(1, 17, 1, 27), relatedInformation: [{
+                            location: vscode_languageserver_1.Location.create(vscode_uri_1.URI.file((0, util_1.standardizePath) `${rootDir}/components/component2.xml`).toString(), vscode_languageserver_1.Range.create(1, 17, 1, 27)),
+                            message: 'Also defined here'
+                        }] })]);
+        });
+        it('allows adding diagnostics', () => {
+            const expected = [{
+                    message: 'message',
+                    file: undefined,
+                    range: undefined
+                }];
+            program.addDiagnostics(expected);
+            const actual = program.diagnostics;
+            (0, chai_1.expect)(actual).to.deep.equal(expected);
+        });
+        it('does not produce duplicate parse errors for different component scopes', () => {
+            //add a file with a parse error
+            program.setFile({ src: `${rootDir}/components/lib.brs`, dest: 'components/lib.brs' }, `
+                sub DoSomething()
+                    'random out-of-place open paren, definitely causes parse error
+                    (
+                end sub
+            `);
+            //add 2 components which both reference the same errored file
+            program.setFile({ src: `${rootDir}/components/component1.xml`, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/lib.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/component2.xml`, dest: 'components/component2.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component2" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/lib.brs" />
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectHasDiagnostics)(program, 1);
+        });
+        it('detects scripts not loaded by any file', () => {
+            //add a main file for sanity check
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, '');
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            //add the orphaned file
+            program.setFile({ src: `${rootDir}/components/lib.brs`, dest: 'components/lib.brs' }, '');
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.fileNotReferencedByAnyOtherFile()
+            ]);
+        });
+        it('does not throw errors on shadowed init functions in components', () => {
+            program.setFile({ src: `${rootDir}/lib.brs`, dest: 'lib.brs' }, `
+                function DoSomething()
+                    return true
+                end function
+            `);
+            program.setFile({ src: `${rootDir}/components/Parent.xml`, dest: 'components/Parent.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Parent" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/lib.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/Child.xml`, dest: 'components/Child.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Child" extends="Parent">
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+        it('recognizes global function calls', () => {
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            program.setFile({ src: `${rootDir}/source/file.brs`, dest: 'source/file.brs' }, `
+                function DoB()
+                    sleep(100)
+                end function
+            `);
+            //validate the scope
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+        it('shows warning when a child component imports the same script as its parent', () => {
+            program.setFile({ src: `${rootDir}/components/parent.xml`, dest: 'components/parent.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/lib.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/child.xml`, dest: 'components/child.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                    <script type="text/brightscript" uri="pkg:/lib.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/lib.brs`, dest: 'lib.brs' }, `'comment`);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.unnecessaryScriptImportInChildFromParent('ParentScene')
+            ]);
+        });
+        it('adds info diag when child component method shadows parent component method', () => {
+            program.setFile({ src: `${rootDir}/components/parent.xml`, dest: 'components/parent.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/parent.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/child.xml`, dest: 'components/child.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                    <script type="text/brightscript" uri="pkg:/child.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/parent.brs`, dest: 'parent.brs' }, `sub DoSomething()\nend sub`);
+            program.setFile({ src: `${rootDir}/child.brs`, dest: 'child.brs' }, `sub DoSomething()\nend sub`);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.overridesAncestorFunction('', '', '', '').code
+            ]);
+        });
+        it('does not add info diagnostic on shadowed "init" functions', () => {
+            program.setFile('components/parent.xml', (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                    <script type="text/brightscript" uri="parent.brs" />
+                </component>
+                `);
+            program.setFile(`components/parent.brs`, `sub Init()\nend sub`);
+            program.setFile(`components/child.brs`, `sub Init()\nend sub`);
+            program.setFile('components/child.xml', (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                    <script type="text/brightscript" uri="child.brs" />
+                </component>
+            `);
+            //run this validate separately so we can have an easier time debugging just the child component
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+        it('catches duplicate methods in single file', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+                sub DoSomething()
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.duplicateFunctionImplementation('DoSomething', 'source'),
+                DiagnosticMessages_1.DiagnosticMessages.duplicateFunctionImplementation('DoSomething', 'source')
+            ]);
+        });
+        it('catches duplicate methods across multiple files', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+            `);
+            program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `
+                sub DoSomething()
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.duplicateFunctionImplementation('DoSomething', 'source'),
+                DiagnosticMessages_1.DiagnosticMessages.duplicateFunctionImplementation('DoSomething', 'source')
+            ]);
+        });
+        it('maintains correct callables list', () => {
+            let initialCallableCount = program.getScopeByName('source').getAllCallables().length;
+            program.setFile('source/main.brs', `
+                sub DoSomething()
+                end sub
+                sub DoSomething()
+                end sub
+            `);
+            (0, chai_1.expect)(program.getScopeByName('source').getAllCallables().length).equals(initialCallableCount + 2);
+            //set the file contents again (resetting the wasProcessed flag)
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+                sub DoSomething()
+                end sub
+                `);
+            (0, chai_1.expect)(program.getScopeByName('source').getAllCallables().length).equals(initialCallableCount + 2);
+            program.removeFile(`${rootDir}/source/main.brs`);
+            (0, chai_1.expect)(program.getScopeByName('source').getAllCallables().length).equals(initialCallableCount);
+        });
+        it('resets errors on revalidate', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+                sub DoSomething()
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectHasDiagnostics)(program, 2);
+            //set the file contents again (resetting the wasProcessed flag)
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+                sub DoSomething()
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectHasDiagnostics)(program, 2);
+            //load in a valid file, the errors should go to zero
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub DoSomething()
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+        it('identifies invocation of unknown function', () => {
+            //call a function that doesn't exist
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    name = "Hello"
+                    DoSomething(name)
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.callToUnknownFunction('DoSomething', 'source')
+            ]);
+        });
+        it('detects methods from another file in a subdirectory', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    DoSomething()
+                end sub
+            `);
+            program.setFile({ src: `${rootDir}/source/ui/lib.brs`, dest: 'source/ui/lib.brs' }, `
+                function DoSomething()
+                    print "hello world"
+                end function
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+    });
+    describe('hasFile', () => {
+        it('recognizes when it has a file loaded', () => {
+            (0, chai_1.expect)(program.hasFile('file1.brs')).to.be.false;
+            program.setFile('file1.brs', `'comment`);
+            (0, chai_1.expect)(program.hasFile('file1.brs')).to.be.true;
+        });
+    });
+    describe('setFile', () => {
+        it('links xml scopes based on xml parent-child relationships', () => {
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                </component>
+            `);
+            //create child component
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ChildScene.xml`, dest: 'components/ChildScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                </component>
+            `);
+            (0, chai_1.expect)(program.getScopeByName('components/ChildScene.xml').getParentScope().name).to.equal((0, util_1.standardizePath) `components/ParentScene.xml`);
+            //change the parent's name.
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="NotParentScene" extends="Scene">
+                </component>
+            `);
+            //The child scope should no longer have the link to the parent scope, and should instead point back to global
+            (0, chai_1.expect)(program.getScopeByName('components/ChildScene.xml').getParentScope().name).to.equal('global');
+        });
+        it('creates a new scope for every added component xml', () => {
+            //we have global callables, so get that initial number
+            program.setFile({ src: `${rootDir}/components/component1.xml`, dest: 'components/component1.xml' }, '');
+            (0, chai_1.expect)(program.getScopeByName(`components/component1.xml`)).to.exist;
+            program.setFile({ src: `${rootDir}/components/component1.xml`, dest: 'components/component1.xml' }, '');
+            program.setFile({ src: `${rootDir}/components/component2.xml`, dest: 'components/component2.xml' }, '');
+            (0, chai_1.expect)(program.getScopeByName(`components/component1.xml`)).to.exist;
+            (0, chai_1.expect)(program.getScopeByName(`components/component2.xml`)).to.exist;
+        });
+        it('includes referenced files in xml scopes', () => {
+            let xmlPath = (0, util_1.standardizePath) `${rootDir}/components/component1.xml`;
+            program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component1.brs" />
+                </component>
+            `);
+            let brsPath = (0, util_1.standardizePath) `${rootDir}/components/component1.brs`;
+            program.setFile({ src: brsPath, dest: 'components/component1.brs' }, '');
+            let scope = program.getScopeByName(`components/component1.xml`);
+            (0, chai_1.expect)(scope.getFile(xmlPath).pkgPath).to.equal((0, util_1.standardizePath) `components/component1.xml`);
+            (0, chai_1.expect)(scope.getFile(brsPath).pkgPath).to.equal((0, util_1.standardizePath) `components/component1.brs`);
+        });
+        it('adds xml file to files map', () => {
+            let xmlPath = `${rootDir}/components/component1.xml`;
+            program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, '');
+            (0, chai_1.expect)(program.getFileByPathAbsolute(xmlPath)).to.exist;
+        });
+        it('detects missing script reference', () => {
+            let xmlPath = `${rootDir}/components/component1.xml`;
+            program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component1.brs" />
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [Object.assign(Object.assign({}, DiagnosticMessages_1.DiagnosticMessages.referencedFileDoesNotExist()), { range: vscode_languageserver_1.Range.create(2, 42, 2, 72) })]);
+        });
+        it('adds warning instead of error on mismatched upper/lower case script import', () => {
+            program.setFile('components/component1.xml', (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="component1.brs" />
+                </component>
+            `);
+            program.setFile('components/COMPONENT1.brs', '');
+            //validate
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.scriptImportCaseMismatch((0, util_1.standardizePath) `components\\COMPONENT1.brs`)
+            ]);
+        });
+    });
+    describe('reloadFile', () => {
+        it('picks up new files in a scope when an xml file is loaded', () => {
+            program.options.ignoreErrorCodes.push(1013);
+            let xmlPath = (0, util_1.standardizePath) `${rootDir}/components/component1.xml`;
+            program.setFile({ src: xmlPath, dest: 'components/comonent1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component1.brs" />
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.referencedFileDoesNotExist()
+            ]);
+            //add the file, the error should go away
+            let brsPath = (0, util_1.standardizePath) `${rootDir}/components/component1.brs`;
+            program.setFile({ src: brsPath, dest: 'components/component1.brs' }, '');
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            //add the xml file back in, but change the component brs file name. Should have an error again
+            program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component2.brs" />
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.referencedFileDoesNotExist()
+            ]);
+        });
+        it('handles when the brs file is added before the component', () => {
+            let brsPath = (0, util_1.standardizePath) `${rootDir}/components/component1.brs`;
+            program.setFile({ src: brsPath, dest: 'components/component1.brs' }, '');
+            let xmlPath = (0, util_1.standardizePath) `${rootDir}/components/component1.xml`;
+            let xmlFile = program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component1.brs" />
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath).getFile(brsPath)).to.exist;
+        });
+        it('reloads referenced fles when xml file changes', () => {
+            program.options.ignoreErrorCodes.push(1013);
+            let brsPath = (0, util_1.standardizePath) `${rootDir}/components/component1.brs`;
+            program.setFile({ src: brsPath, dest: 'components/component1.brs' }, '');
+            let xmlPath = (0, util_1.standardizePath) `${rootDir}/components/component1.xml`;
+            let xmlFile = program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+
+                </component>
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath).getFile(brsPath)).not.to.exist;
+            //reload the xml file contents, adding a new script reference.
+            xmlFile = program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/component1.brs" />
+                </component>
+            `);
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath).getFile(brsPath)).to.exist;
+        });
+    });
+    describe('getCodeActions', () => {
+        it('does not fail when file is missing from program', () => {
+            (0, assert_1.doesNotThrow)(() => {
+                program.getCodeActions('not/real/file', util_1.util.createRange(1, 2, 3, 4));
+            });
+        });
+    });
+    describe('getCompletions', () => {
+        it('includes `for each` variable', () => {
+            program.setFile('source/main.brs', `
+                sub main()
+                    items = [1, 2, 3]
+                    for each thing in items
+                        t =
+                    end for
+                    end for
+                end sub
+            `);
+            program.validate();
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(4, 28)).map(x => x.label);
+            (0, chai_1.expect)(completions).to.include('thing');
+        });
+        it('includes `for` variable', () => {
+            program.setFile('source/main.brs', `
+                sub main()
+                    for i = 0 to 10
+                        t =
+                    end for
+                end sub
+            `);
+            program.validate();
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(3, 28)).map(x => x.label);
+            (0, chai_1.expect)(completions).to.include('i');
+        });
+        it('should include first-level namespace names for brighterscript files', () => {
+            program.setFile('source/main.bs', `
+                namespace NameA.NameB.NameC
+                    sub DoSomething()
+                    end sub
+                end namespace
+                sub main()
+                    print
+                end sub
+            `);
+            (0, testHelpers_spec_1.expectCompletionsIncludes)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(6, 25)), [{
+                    label: 'NameA',
+                    kind: vscode_languageserver_1.CompletionItemKind.Module
+                }]);
+            (0, testHelpers_spec_1.expectCompletionsExcludes)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(6, 25)), [{
+                    label: 'NameB',
+                    kind: vscode_languageserver_1.CompletionItemKind.Module
+                }, {
+                    label: 'NameA.NameB',
+                    kind: vscode_languageserver_1.CompletionItemKind.Module
+                }, {
+                    label: 'NameA.NameB.NameC',
+                    kind: vscode_languageserver_1.CompletionItemKind.Module
+                }, {
+                    label: 'NameA.NameB.NameC.DoSomething',
+                    kind: vscode_languageserver_1.CompletionItemKind.Module
+                }]);
+        });
+        it('resolves completions for namespaces with next namespace part for brighterscript file', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                namespace NameA.NameB.NameC
+                    sub DoSomething()
+                    end sub
+                end namespace
+                sub main()
+                    NameA.
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(6, 26)).map(x => x.label);
+            (0, chai_1.expect)(completions).to.include('NameB');
+            (0, chai_1.expect)(completions).not.to.include('NameA');
+            (0, chai_1.expect)(completions).not.to.include('NameA.NameB');
+            (0, chai_1.expect)(completions).not.to.include('NameA.NameB.NameC');
+            (0, chai_1.expect)(completions).not.to.include('NameA.NameB.NameC.DoSomething');
+        });
+        it('finds namespace members for brighterscript file', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                sub main()
+                    NameA.
+                    NameA.NameB.
+                    NameA.NameB.NameC.
+                end sub
+                namespace NameA
+                    sub alertA()
+                    end sub
+                end namespace
+                namespace NameA
+                    sub info()
+                    end sub
+                end namespace
+                namespace NameA.NameB
+                    sub alertB()
+                    end sub
+                end namespace
+                namespace NameA.NameB.NameC
+                    sub alertC()
+                    end sub
+                end namespace
+            `);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 26)).map(x => x.label).sort()).to.eql(['NameB', 'alertA', 'info']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(3, 32)).map(x => x.label).sort()).to.eql(['NameC', 'alertB']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(4, 38)).map(x => x.label).sort()).to.eql(['alertC']);
+        });
+        it('finds namespace members for classes', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                sub main()
+                    NameA.
+                    NameA.NameB.
+                    NameA.NameB.NameC.
+                end sub
+                namespace NameA
+                    sub alertA()
+                    end sub
+                end namespace
+                namespace NameA
+                    sub info()
+                    end sub
+                    class MyClassA
+                    end class
+                end namespace
+                namespace NameA.NameB
+                    sub alertB()
+                    end sub
+                    class MyClassB
+                    end class
+                end namespace
+                namespace NameA.NameB.NameC
+                    sub alertC()
+                    end sub
+                end namespace
+            `);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 26)).map(x => x.label).sort()).to.eql(['MyClassA', 'NameB', 'alertA', 'info']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(3, 32)).map(x => x.label).sort()).to.eql(['MyClassB', 'NameC', 'alertB']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(4, 38)).map(x => x.label).sort()).to.eql(['alertC']);
+        });
+        it('finds only namespaces that have classes, when new keyword is used', () => {
+            program.setFile('source/main.bs', `
+                sub main()
+                    a = new NameA.
+                    b = new NameA.NameB.
+                    c = new NameA.NameB.NameC.
+                end sub
+                namespace NameA
+                    sub alertA()
+                    end sub
+                end namespace
+                namespace NameA
+                    sub info()
+                    end sub
+                    class MyClassA
+                    end class
+                end namespace
+                namespace NameA.NameB
+                namespace NameA.NoClassA
+                end namespace
+                namespace NameA.NoClassB
+                end namespace
+                namespace NameA.NameB
+                    sub alertB()
+                    end sub
+                    class MyClassB
+                    end class
+                end namespace
+                namespace NameA.NameB.NoClass
+                end namespace
+                namespace NameA.NameB.NameC
+                    sub alertC()
+                    end sub
+                end namespace
+            `);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 34)).map(x => x.label).sort()).to.eql(['MyClassA', 'NameB']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(3, 40)).map(x => x.label).sort()).to.eql(['MyClassB']);
+            (0, chai_1.expect)(program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(4, 46)).map(x => x.label).sort()).to.be.empty;
+        });
+        //Bron.. pain to get this working.. do we realy need this? seems moot with ropm..
+        it.skip('should include translated namespace function names for brightscript files', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.bs' }, `
+                namespace NameA.NameB.NameC
+                    sub DoSomething()
+                    end sub
+                end namespace
+            `);
+            program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `
+                sub test()
+
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/lib.brs`, vscode_languageserver_1.Position.create(2, 23));
+            (0, chai_1.expect)(completions.map(x => x.label)).to.include('NameA_NameB_NameC_DoSomething');
+        });
+        it('inlcudes global completions for file with no scope', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'main.brs' }, `
+                function Main()
+                    age = 1
+                end function
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            (0, chai_1.expect)(completions.filter(x => x.label.toLowerCase() === 'abs')).to.be.lengthOf(1);
+        });
+        it('filters out text results for top-level function statements', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                function Main()
+                    age = 1
+                end function
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'Main')).to.be.lengthOf(1);
+        });
+        it('does not filter text results for object properties used in conditional statements', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    p.
+                end sub
+                sub SayHello()
+                    person = {}
+                    if person.isAlive then
+                        print "Hello"
+                    end if
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 22));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'isAlive')).to.be.lengthOf(1);
+        });
+        it('does not filter text results for object properties used in assignments', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    p.
+                end sub
+                sub SayHello()
+                   person = {}
+                   localVar = person.name
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 22));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'name')).to.be.lengthOf(1);
+        });
+        it('does not filter text results for object properties', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    p.
+                end sub
+                sub SayHello()
+                   person = {}
+                   person.name = "bob"
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 22));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'name')).to.be.lengthOf(1);
+        });
+        it('filters out text results for local vars used in conditional statements', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+
+                end sub
+                sub SayHello()
+                    isTrue = true
+                    if isTrue then
+                        print "is true"
+                    end if
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'isTrue')).to.be.lengthOf(0);
+        });
+        it('filters out text results for local variable assignments', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+
+                end sub
+                sub SayHello()
+                    message = "Hello"
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'message')).to.be.lengthOf(0);
+        });
+        it('filters out text results for local variables used in assignments', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+
+                end sub
+                sub SayHello()
+                    message = "Hello"
+                    otherVar = message
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            (0, chai_1.expect)(completions.filter(x => x.label === 'message')).to.be.lengthOf(0);
+        });
+        it('does not suggest local variables when initiated to the right of a period', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                function Main()
+                    helloMessage = "jack"
+                    person.hello
+                end function
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(3, 32));
+            (0, chai_1.expect)(completions.filter(x => x.kind === vscode_languageserver_1.CompletionItemKind.Variable).map(x => x.label)).not.to.contain('helloMessage');
+        });
+        it('finds all file paths when initiated on xml uri', () => {
+            let xmlPath = (0, util_1.standardizePath) `${rootDir}/components/component1.xml`;
+            program.setFile({ src: xmlPath, dest: 'components/component1.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="HeroScene" extends="Scene">
+                    <script type="text/brightscript" uri="" />
+                </component>
+            `);
+            let brsPath = (0, util_1.standardizePath) `${rootDir}/components/component1.brs`;
+            program.setFile({ src: brsPath, dest: 'components/component1.brs' }, '');
+            let completions = program.getCompletions(xmlPath, vscode_languageserver_1.Position.create(2, 42));
+            (0, chai_1.expect)(completions[0]).to.include({
+                kind: vscode_languageserver_1.CompletionItemKind.File,
+                label: 'component1.brs'
+            });
+            (0, chai_1.expect)(completions[1]).to.include({
+                kind: vscode_languageserver_1.CompletionItemKind.File,
+                label: 'pkg:/components/component1.brs'
+            });
+            //it should NOT include the global methods
+            (0, chai_1.expect)(completions).to.be.lengthOf(2);
+        });
+        it('get all functions and properties in scope when doing any dotted get on non m ', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                sub main()
+                    thing.anonPropA = "foo"
+                    thing.anonPropB = "bar"
+                    thing.person
+                end sub
+                class MyClassA
+                    personName = "rafa"
+                    personAName = "rafaA"
+                    function personAMethodA()
+                    end function
+                    function personAMethodB()
+                    end function
+                end class
+                namespace NameA
+                    sub alertA()
+                    end sub
+                end namespace
+                namespace NameA.NameB
+                    sub alertB()
+                    end sub
+                    class MyClassB
+                        personName = "roger"
+                        personBName = "rogerB"
+                        function personAMethodC()
+                        end function
+                        function personBMethodA()
+                        end function
+                        function personBMethodB()
+                        end function
+                    end class
+                end namespace
+                namespace NameA.NameB.NameC
+                    sub alertC()
+                    end sub
+                end namespace
+            `);
+            //note - we let the vscode extension do the filtering, so we still return everything; otherwise it exhibits strange behaviour in the IDE
+            (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(4, 32))).map(x => x.label).sort()).to.eql(['anonPropA', 'anonPropB', 'person', 'personAMethodA', 'personAMethodB', 'personAMethodC', 'personAName', 'personBMethodA', 'personBMethodB', 'personBName', 'personName']);
+        });
+        it('get all functions and properties relevant for m ', () => {
+            program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                class MyClassA
+                    function new()
+                        m.
+                    end function
+                    personName = "rafa"
+                    personAName = "rafaA"
+                    function personAMethodA()
+                    end function
+                    function personAMethodB()
+                    end function
+                end class
+                class MyClassB
+                    personName = "roger"
+                    personBName = "rogerB"
+                    function personAMethodC()
+                    end function
+                    function personBMethodA()
+                    end function
+                    function personBMethodB()
+                    end function
+                end class
+                class MyClassC extends MyClassA
+                    function new()
+                        m.
+                    end function
+                    personCName = "rogerC"
+                    function personCMethodC()
+                    end function
+                    function personCMethodA()
+                    end function
+                    function personCMethodB()
+                    end function
+                end class
+                sub alertC()
+                end sub
+            `);
+            (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(3, 26))).map(x => x.label).sort()).to.eql(['personAMethodA', 'personAMethodB', 'personAName', 'personName']);
+            (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(24, 26))).map(x => x.label).sort()).to.eql(['personAMethodA', 'personAMethodB', 'personAName', 'personCMethodA', 'personCMethodB', 'personCMethodC', 'personCName', 'personName']);
+        });
+    });
+    it('include non-namespaced classes in the list of general output', () => {
+        program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                function regularFunc()
+                    MyClass
+                end function
+                sub alertC()
+                end sub
+                class MyClassA
+                end class
+                class MyClassB
+                end class
+                class MyClassC extends MyClassA
+                end class
+            `);
+        (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(3, 26))).map(x => x.label).sort()).to.include.members(['MyClassA', 'MyClassB', 'MyClassC']);
+    });
+    it('only include classes when using new keyword', () => {
+        program.setFile({ src: `${rootDir}/source/main.bs`, dest: 'source/main.brs' }, `
+                class MyClassA
+                end class
+                class MyClassB
+                end class
+                class MyClassC extends MyClassA
+                end class
+                function regularFunc()
+                    new MyClass
+                end function
+                sub alertC()
+                end sub
+            `);
+        (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(8, 29))).map(x => x.label).sort()).to.eql(['MyClassA', 'MyClassB', 'MyClassC']);
+    });
+    it('gets completions when using callfunc inovation', () => {
+        program.setFile('source/main.bs', `
+            function main()
+                myNode@.sayHello(arg1)
+            end function
+        `);
+        program.setFile('components/MyNode.bs', `
+            function sayHello(text, text2)
+            end function
+        `);
+        program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component1" extends="Scene">
+                <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                <interface>
+                    <function name="sayHello"/>
+                </interface>
+            </component>`);
+        program.validate();
+        (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 30))).map(x => x.label).sort()).to.eql(['sayHello']);
+    });
+    it('gets completions for callfunc invocation with multiple nodes', () => {
+        program.setFile('source/main.bs', `
+            function main()
+                myNode@.sayHello(arg1)
+            end function
+        `);
+        program.setFile('components/MyNode.bs', `
+            function sayHello(text, text2)
+            end function
+            function sayHello2(text, text2)
+            end function
+        `);
+        program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component1" extends="Scene">
+                <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                <interface>
+                    <function name="sayHello"/>
+                    <function name="sayHello2"/>
+                </interface>
+            </component>`);
+        program.setFile('components/MyNode2.bs', `
+            function sayHello3(text, text2)
+            end function
+            function sayHello4(text, text2)
+            end function
+        `);
+        program.setFile('components/MyNode2.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component2" extends="Scene">
+                <script type="text/brightscript" uri="pkg:/components/MyNode2.bs" />
+                <interface>
+                    <function name="sayHello3"/>
+                    <function name="sayHello4"/>
+                </interface>
+            </component>`);
+        program.validate();
+        (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 30))).map(x => x.label).sort()).to.eql(['sayHello', 'sayHello2', 'sayHello3', 'sayHello4']);
+    });
+    it('gets completions for extended nodes with callfunc invocation - ensure overridden methods included', () => {
+        program.setFile('source/main.bs', `
+            function main()
+                myNode@.sayHello(arg1)
+            end function
+        `);
+        program.setFile('components/MyNode.bs', `
+            function sayHello(text, text2)
+            end function
+            function sayHello2(text, text2)
+            end function
+        `);
+        program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component1" extends="Scene">
+                <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                <interface>
+                    <function name="sayHello"/>
+                    <function name="sayHello2"/>
+                </interface>
+            </component>`);
+        program.setFile('components/MyNode2.bs', `
+            function sayHello3(text, text2)
+            end function
+            function sayHello2(text, text2)
+            end function
+            function sayHello4(text, text2)
+            end function
+        `);
+        program.setFile('components/MyNode2.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component2" extends="Component1">
+                <script type="text/brightscript" uri="pkg:/components/MyNode2.bs" />
+                <interface>
+                    <function name="sayHello3"/>
+                    <function name="sayHello4"/>
+                </interface>
+            </component>`);
+        program.validate();
+        (0, chai_1.expect)((program.getCompletions(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 30))).map(x => x.label).sort()).to.eql(['sayHello', 'sayHello2', 'sayHello2', 'sayHello3', 'sayHello4']);
+    });
+    describe('xml inheritance', () => {
+        it('handles parent-child attach and detach', () => {
+            //create parent component
+            let parentFile = program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                </component>
+            `);
+            //create child component
+            let childFile = program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ChildScene.xml`, dest: 'components/ChildScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                </component>
+            `);
+            //the child should have been attached to the parent
+            (0, chai_1.expect)(childFile.parentComponent).to.equal(parentFile);
+            //change the name of the parent
+            parentFile = program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="NotParentScene" extends="Scene">
+                </component>
+            `);
+            //the child should no longer have a parent
+            (0, chai_1.expect)(childFile.parentComponent).not.to.exist;
+        });
+        it('provides child components with parent functions', () => {
+            //create parent component
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                </component>
+            `);
+            //create child component
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ChildScene.xml`, dest: 'components/ChildScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ChildScene" extends="ParentScene">
+                    <script type="text/brightscript" uri="ChildScene.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/ChildScene.brs`, dest: 'components/ChildScene.brs' }, `
+                sub Init()
+                    DoParentThing()
+                end sub
+            `);
+            program.validate();
+            //there should be an error when calling DoParentThing, since it doesn't exist on child or parent
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.callToUnknownFunction('DoParentThing', '').code
+            ]);
+            //add the script into the parent
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/components/ParentScene.xml`, dest: 'components/ParentScene.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="ParentScene" extends="Scene">
+                    <script type="text/brightscript" uri="ParentScene.brs" />
+                </component>
+            `);
+            program.setFile({ src: `${rootDir}/components/ParentScene.brs`, dest: 'components/ParentScene.brs' }, `
+                sub DoParentThing()
+
+                end sub
+            `);
+            program.validate();
+            //the error should be gone because the child now has access to the parent script
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+    });
+    describe('xml scope', () => {
+        it('does not fail on base components with many children', () => {
+            program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `
+                sub DoSomething()
+                end sub
+            `);
+            //add a brs file with invalid syntax
+            program.setFile({ src: `${rootDir}/components/base.xml`, dest: 'components/base.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="BaseScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/source/lib.brs" />
+                </component>
+            `);
+            let childCount = 20;
+            //add many children, we should never encounter an error
+            for (let i = 0; i < childCount; i++) {
+                program.setFile({ src: `${rootDir}/components/child${i}.xml`, dest: `components/child${i}.xml` }, (0, testHelpers_spec_1.trim) `
+                    <?xml version="1.0" encoding="utf-8" ?>
+                    <component name="Child${i}" extends="BaseScene">
+                        <script type="text/brightscript" uri="pkg:/source/lib.brs" />
+                    </component>
+                `);
+            }
+            program.validate();
+            //the children shouldn't have diagnostics about shadowing their parent lib.brs file.
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program.getDiagnostics().filter((x) => x.code === DiagnosticMessages_1.DiagnosticMessages.overridesAncestorFunction('', '', '', '').code));
+            //the children all include a redundant import of lib.brs file which is imported by the parent.
+            (0, chai_1.expect)(program.getDiagnostics().filter((x) => x.code === DiagnosticMessages_1.DiagnosticMessages.unnecessaryScriptImportInChildFromParent('').code)).to.be.lengthOf(childCount);
+        });
+        it('detects script import changes', () => {
+            //create the xml file without script imports
+            let xmlFile = program.setFile({ src: `${rootDir}/components/component.xml`, dest: 'components/component.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="MyScene" extends="Scene">
+                </component>
+            `);
+            //the component scope should only have the xml file
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath).getOwnFiles().length).to.equal(1);
+            //create the lib file
+            let libFile = program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `'comment`);
+            //change the xml file to have a script import
+            xmlFile = program.setFile({ src: `${rootDir}/components/component.xml`, dest: 'components/component.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="MyScene" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/source/lib.brs" />
+                </component>
+            `);
+            let ctx = program.getScopeByName(xmlFile.pkgPath);
+            //the component scope should have the xml file AND the lib file
+            (0, chai_1.expect)(ctx.getOwnFiles().length).to.equal(2);
+            (0, chai_1.expect)(ctx.getFile(xmlFile.pathAbsolute)).to.exist;
+            (0, chai_1.expect)(ctx.getFile(libFile.pathAbsolute)).to.exist;
+            //reload the xml file again, removing the script import.
+            xmlFile = program.setFile({ src: `${rootDir}/components/component.xml`, dest: 'components/component.xml' }, (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="MyScene" extends="Scene">
+                </component>
+            `);
+            //the scope should again only have the xml file loaded
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath).getOwnFiles().length).to.equal(1);
+            (0, chai_1.expect)(program.getScopeByName(xmlFile.pkgPath)).to.exist;
+        });
+    });
+    describe('getFileByPkgPath', () => {
+        it('finds file in source folder', () => {
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main.brs`)).not.to.exist;
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main2.brs`)).not.to.exist;
+            program.setFile({ src: `${rootDir}/source/main2.brs`, dest: 'source/main2.brs' }, '');
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, '');
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main.brs`)).to.exist;
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main2.brs`)).to.exist;
+        });
+    });
+    describe('removeFiles', () => {
+        it('removes files by absolute paths', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, '');
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main.brs`)).to.exist;
+            program.removeFiles([`${rootDir}/source/main.brs`]);
+            (0, chai_1.expect)(program.getFileByPkgPath((0, util_1.standardizePath) `source/main.brs`)).not.to.exist;
+        });
+    });
+    describe('getDiagnostics', () => {
+        it('includes diagnostics from files not included in any scope', () => {
+            let pathAbsolute = (0, util_1.standardizePath) `${rootDir}/components/a/b/c/main.brs`;
+            program.setFile({ src: pathAbsolute, dest: 'components/a/b/c/main.brs' }, `
+                sub A()
+                    "this string is not terminated
+                end sub
+            `);
+            //the file should be included in the program
+            (0, chai_1.expect)(program.getFileByPathAbsolute(pathAbsolute)).to.exist;
+            let diagnostics = program.getDiagnostics();
+            (0, testHelpers_spec_1.expectHasDiagnostics)(diagnostics);
+            let parseError = diagnostics.filter(x => x.message === 'Unterminated string at end of line')[0];
+            (0, chai_1.expect)(parseError).to.exist;
+        });
+        it('it excludes specified error codes', () => {
+            //declare file with two different syntax errors
+            program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub A()
+                    'call with wrong param count
+                    B(1,2,3)
+
+                    'call unknown function
+                    C()
+                end sub
+
+                sub B(name as string)
+                end sub
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectHasDiagnostics)(program, 2);
+            program.options.diagnosticFilters = [
+                DiagnosticMessages_1.DiagnosticMessages.mismatchArgumentCount(0, 0).code
+            ];
+            (0, testHelpers_spec_1.expectDiagnostics)(program, [
+                DiagnosticMessages_1.DiagnosticMessages.callToUnknownFunction('C', 'source')
+            ]);
+        });
+    });
+    describe('getCompletions', () => {
+        it('returns all functions in scope', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+
+                end sub
+
+                sub ActionA()
+                end sub
+            `);
+            program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `
+                sub ActionB()
+                end sub
+            `);
+            program.validate();
+            let completions = program
+                //get completions
+                .getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10))
+                //only keep the label property for this test
+                .map(x => pick(x, 'label'));
+            (0, chai_1.expect)(completions).to.deep.include({ label: 'Main' });
+            (0, chai_1.expect)(completions).to.deep.include({ label: 'ActionA' });
+            (0, chai_1.expect)(completions).to.deep.include({ label: 'ActionB' });
+        });
+        it('returns all variables in scope', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main()
+                    name = "bob"
+                    age = 20
+                    shoeSize = 12.5
+                end sub
+                sub ActionA()
+                end sub
+            `);
+            program.setFile({ src: `${rootDir}/source/lib.brs`, dest: 'source/lib.brs' }, `
+                sub ActionB()
+                end sub
+            `);
+            program.validate();
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            let labels = completions.map(x => pick(x, 'label'));
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'Main' });
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'ActionA' });
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'ActionB' });
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'name' });
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'age' });
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'shoeSize' });
+        });
+        it('returns empty set when out of range', () => {
+            const position = util_1.util.createPosition(99, 99);
+            program.setFile('source/main.brs', '');
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, position);
+            //get the name of all global completions
+            const globalCompletions = program.globalScope.getAllFiles().flatMap(x => x.getCompletions(position)).map(x => x.label);
+            //filter out completions from global scope
+            completions = completions.filter(x => !globalCompletions.includes(x.label));
+            (0, chai_1.expect)(completions).to.be.empty;
+        });
+        it('finds parameters', () => {
+            program.setFile({ src: `${rootDir}/source/main.brs`, dest: 'source/main.brs' }, `
+                sub Main(count = 1)
+                    firstName = "bob"
+                    age = 21
+                    shoeSize = 10
+                end sub
+            `);
+            let completions = program.getCompletions(`${rootDir}/source/main.brs`, vscode_languageserver_1.Position.create(2, 10));
+            let labels = completions.map(x => pick(x, 'label'));
+            (0, chai_1.expect)(labels).to.deep.include({ label: 'count' });
+        });
+    });
+    it('does not create map by default', async () => {
+        fsExtra.ensureDirSync(program.options.stagingFolderPath);
+        program.setFile('source/main.brs', `
+            sub main()
+            end sub
+        `);
+        program.validate();
+        await program.transpile([], program.options.stagingFolderPath);
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs`)).is.true;
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs.map`)).is.false;
+    });
+    it('creates sourcemap for brs and xml files', async () => {
+        fsExtra.ensureDirSync(program.options.stagingFolderPath);
+        program.setFile('source/main.brs', `
+            sub main()
+            end sub
+        `);
+        program.setFile('components/comp1.xml', (0, testHelpers_spec_1.trim) `
+            <?xml version="1.0" encoding="utf-8" ?>
+            <component name="SimpleScene" extends="Scene">
+            </component>
+        `);
+        program.validate();
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs.map`)).is.false;
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/components/comp1.xml.map`)).is.false;
+        let filePaths = [{
+                src: (0, util_1.standardizePath) `${rootDir}/source/main.brs`,
+                dest: (0, util_1.standardizePath) `source/main.brs`
+            }, {
+                src: (0, util_1.standardizePath) `${rootDir}/components/comp1.xml`,
+                dest: (0, util_1.standardizePath) `components/comp1.xml`
+            }];
+        program.options.sourceMap = true;
+        await program.transpile(filePaths, program.options.stagingFolderPath);
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs.map`)).is.true;
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/components/comp1.xml.map`)).is.true;
+    });
+    it('copies the bslib.brs file', async () => {
+        fsExtra.ensureDirSync(program.options.stagingFolderPath);
+        program.validate();
+        await program.transpile([], program.options.stagingFolderPath);
+        (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/bslib.brs`)).is.true;
+    });
+    describe('getTranspiledFileContents', () => {
+        it('fires plugin events', () => {
+            const file = program.setFile('source/main.brs', (0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "hello world"
+                end sub
+            `);
+            const plugin = program.plugins.add({
+                name: 'TestPlugin',
+                beforeFileTranspile: (event) => {
+                    const stmt = event.file.ast.statements[0].func.body.statements[0];
+                    event.editor.setProperty(stmt.expressions[0].token, 'text', '"hello there"');
+                },
+                afterFileTranspile: sinon.spy()
+            });
+            (0, chai_1.expect)(program.getTranspiledFileContents(file.pathAbsolute).code).to.eql((0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "hello there"
+                end sub`);
+            (0, chai_1.expect)(plugin.afterFileTranspile.callCount).to.be.greaterThan(0);
+        });
+        it('allows events to modify the file contents', async () => {
+            program.options.emitDefinitions = true;
+            program.plugins.add({
+                name: 'TestPlugin',
+                afterFileTranspile: (event) => {
+                    event.code = `'code comment\n${event.code}`;
+                    event.typedef = `'typedef comment\n${event.typedef}`;
+                }
+            });
+            program.setFile('source/lib.bs', `
+                sub log(message)
+                    print message
+                end sub
+            `);
+            await program.transpile([], stagingFolderPath);
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.brs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+                'code comment
+                sub log(message)
+                    print message
+                end sub`);
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.d.bs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+                'typedef comment
+                sub log(message)
+                end sub
+            `);
+        });
+    });
+    describe('transpile', () => {
+        it('sets needsTranspiled=true when there is at least one edit', async () => {
+            program.setFile('source/main.brs', (0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "hello world"
+                end sub
+            `);
+            program.plugins.add({
+                name: 'TestPlugin',
+                beforeFileTranspile: (event) => {
+                    const stmt = event.file.ast.statements[0].func.body.statements[0];
+                    event.editor.setProperty(stmt.expressions[0].token, 'text', '"hello there"');
+                }
+            });
+            await program.transpile([], stagingFolderPath);
+            //our changes should be there
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/main.brs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "hello there"
+                end sub`);
+        });
+        it('handles AstEditor flow properly', async () => {
+            program.setFile('source/main.bs', `
+                sub main()
+                    print "hello world"
+                end sub
+            `);
+            let literalExpression;
+            //replace all strings with "goodbye world"
+            program.plugins.add({
+                name: 'TestPlugin',
+                beforeFileTranspile: (event) => {
+                    if ((0, reflection_1.isBrsFile)(event.file)) {
+                        event.file.ast.walk((0, visitors_1.createVisitor)({
+                            LiteralExpression: (literal) => {
+                                literalExpression = literal;
+                                event.editor.setProperty(literal.token, 'text', '"goodbye world"');
+                            }
+                        }), {
+                            walkMode: visitors_1.WalkMode.visitExpressionsRecursive
+                        });
+                    }
+                }
+            });
+            //transpile the file
+            await program.transpile([], stagingFolderPath);
+            //our changes should be there
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/main.brs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "goodbye world"
+                end sub`);
+            //our literalExpression should have been restored to its original value
+            (0, chai_1.expect)(literalExpression.token.text).to.eql('"hello world"');
+        });
+        it('copies bslib.brs when no ropm version was found', async () => {
+            await program.transpile([], stagingFolderPath);
+            (0, chai_1.expect)(fsExtra.pathExistsSync(`${stagingFolderPath}/source/bslib.brs`)).to.be.true;
+        });
+        it('does not copy bslib.brs when found in roku_modules', async () => {
+            program.setFile('source/roku_modules/bslib/bslib.brs', '');
+            await program.transpile([], stagingFolderPath);
+            (0, chai_1.expect)(fsExtra.pathExistsSync(`${stagingFolderPath}/source/bslib.brs`)).to.be.false;
+            (0, chai_1.expect)(fsExtra.pathExistsSync(`${stagingFolderPath}/source/roku_modules/bslib/bslib.brs`)).to.be.true;
+        });
+        it('transpiles in-memory-only files', async () => {
+            program.setFile('source/logger.bs', (0, testHelpers_spec_1.trim) `
+                sub logInfo()
+                    print SOURCE_LINE_NUM
+                end sub
+            `);
+            await program.transpile([], program.options.stagingFolderPath);
+            (0, chai_1.expect)((0, testHelpers_spec_1.trimMap)(fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/logger.brs`).toString()) + '\n').to.eql((0, testHelpers_spec_1.trim) `
+                sub logInfo()
+                    print 2
+                end sub
+            `);
+        });
+        it('copies in-memory-only .brs files to stagingDir', async () => {
+            program.setFile('source/logger.brs', (0, testHelpers_spec_1.trim) `
+                sub logInfo()
+                    print "logInfo"
+                end sub
+            `);
+            await program.transpile([], program.options.stagingFolderPath);
+            (0, chai_1.expect)((0, testHelpers_spec_1.trimMap)(fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/logger.brs`).toString())).to.eql((0, testHelpers_spec_1.trim) `
+                sub logInfo()
+                    print "logInfo"
+                end sub
+            `);
+        });
+        it('copies in-memory .xml file', async () => {
+            program.setFile('components/Component1.xml', (0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                </component>
+            `);
+            await program.transpile([], program.options.stagingFolderPath);
+            (0, chai_1.expect)((0, testHelpers_spec_1.trimMap)(fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/components/Component1.xml`).toString())).to.eql((0, testHelpers_spec_1.trim) `
+                <?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/source/bslib.brs" />
+                </component>
+            `);
+        });
+        it('uses sourceRoot when provided for brs files', async () => {
+            let sourceRoot = (0, util_1.standardizePath) `${tmpPath}/sourceRootFolder`;
+            program = new Program_1.Program({
+                rootDir: rootDir,
+                stagingFolderPath: stagingFolderPath,
+                sourceRoot: sourceRoot,
+                sourceMap: true
+            });
+            program.setFile('source/main.brs', `
+                sub main()
+                end sub
+            `);
+            await program.transpile([{
+                    src: (0, util_1.standardizePath) `${rootDir}/source/main.brs`,
+                    dest: (0, util_1.standardizePath) `source/main.brs`
+                }], stagingFolderPath);
+            let contents = fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs.map`).toString();
+            let map = JSON.parse(contents);
+            (0, chai_1.expect)((0, util_1.standardizePath) `${map.sources[0]}`).to.eql((0, util_1.standardizePath) `${sourceRoot}/source/main.brs`);
+        });
+        it('uses sourceRoot when provided for bs files', async () => {
+            let sourceRoot = (0, util_1.standardizePath) `${tmpPath}/sourceRootFolder`;
+            program = new Program_1.Program({
+                rootDir: rootDir,
+                stagingFolderPath: stagingFolderPath,
+                sourceRoot: sourceRoot,
+                sourceMap: true
+            });
+            program.setFile('source/main.bs', `
+                sub main()
+                end sub
+            `);
+            await program.transpile([{
+                    src: (0, util_1.standardizePath) `${rootDir}/source/main.bs`,
+                    dest: (0, util_1.standardizePath) `source/main.bs`
+                }], stagingFolderPath);
+            let contents = fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/main.brs.map`).toString();
+            let map = JSON.parse(contents);
+            (0, chai_1.expect)((0, util_1.standardizePath) `${map.sources[0]}`).to.eql((0, util_1.standardizePath) `${sourceRoot}/source/main.bs`);
+        });
+    });
+    describe('typedef', () => {
+        describe('emitDefinitions', () => {
+            it('generates typedef for .bs files', async () => {
+                program.setFile('source/Duck.bs', `
+                    class Duck
+                    end class
+                `);
+                program.options.emitDefinitions = true;
+                program.validate();
+                await program.transpile([], stagingFolderPath);
+                (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/Duck.brs`)).to.be.true;
+                (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/Duck.d.bs`)).to.be.true;
+                (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/Duck.d.brs`)).to.be.false;
+            });
+            it('does not generate typedef for typedef file', async () => {
+                program.setFile('source/Duck.d.bs', `
+                    class Duck
+                    end class
+                `);
+                program.options.emitDefinitions = true;
+                program.validate();
+                await program.transpile([], stagingFolderPath);
+                (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/Duck.d.brs`)).to.be.false;
+                (0, chai_1.expect)(fsExtra.pathExistsSync((0, util_1.standardizePath) `${stagingFolderPath}/source/Duck.brs`)).to.be.false;
+            });
+        });
+        it('ignores bs1018 for d.bs files', () => {
+            program.setFile('source/main.d.bs', `
+                class Duck
+                    sub new(name as string)
+                    end sub
+                    name as string
+                end class
+
+                class BabyDuck extends Duck
+                    sub new(name as string, age as integer)
+                    end sub
+                    age as integer
+                end class
+            `);
+            program.validate();
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+        });
+    });
+    describe('getSignatureHelp', () => {
+        it('does not crash when second previousToken is undefined', () => {
+            const file = program.setFile('source/main.brs', ` `);
+            sinon.stub(file, 'getPreviousToken').returns(undefined);
+            //should not crash
+            (0, chai_1.expect)(file['getClassFromMReference'](util_1.util.createPosition(2, 3), (0, creators_1.createToken)(TokenKind_1.TokenKind.Dot, '.'), null)).to.be.undefined;
+        });
+        it('works with no leading whitespace when the cursor is after the open paren', () => {
+            program.setFile('source/main.brs', `sub main()\nsayHello()\nend sub\nsub sayHello(name)\nend sub`);
+            let signatureHelp = program.getSignatureHelp(`${rootDir}/source/main.brs`, 
+            //sayHello(|)
+            util_1.util.createPosition(1, 9));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('sub sayHello(name)');
+        });
+        it('ignores comments and invalid ranges', () => {
+            var _a;
+            program.setFile('source/main.bs', `
+                function main()
+                    ' new func(((
+                end function
+            `);
+            for (let col = 0; col < 40; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+                (0, chai_1.expect)((_a = signatureHelp[0]) === null || _a === void 0 ? void 0 : _a.signature).to.not.exist;
+            }
+        });
+        it('does not crash on callfunc operator', () => {
+            //there needs to be at least one xml component WITHOUT an interface
+            program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                </component>
+            `);
+            const file = program.setFile('source/main.bs', `
+                sub main()
+                    someFunc()@.
+                end sub
+            `);
+            program.getCompletions(file.pathAbsolute, util_1.util.createPosition(2, 32));
+        });
+        it('gets signature help for constructor with no args', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p = new Person()
+                end function
+
+                class Person
+                    function new()
+                    end function
+
+                    function sayHello()
+                    end function
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 31)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('Person()');
+        });
+        it('gets signature help for class function on dotted get with params', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p.sayHello("there")
+                end function
+
+                class Person
+                    function new()
+                    end function
+
+                    function sayHello(text)
+                    end function
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 32)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 34)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 27)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 23)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+        });
+        it('gets signature help for namespaced class function', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    person.sayHello("there")
+                end function
+                namespace player
+                    class Person
+                        function new()
+                        end function
+
+                        function sayHello(text)
+                        end function
+                    end class
+                end namespace
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 40)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 30)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text)');
+        });
+        it('gets signature help for namespace function', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    person.sayHello("hey", "you")
+                end function
+
+                namespace person
+                    function sayHello(text, text2)
+                    end function
+                end namespace
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 36)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text, text2)');
+        });
+        it('gets signature help for nested namespace function', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    person.roger.sayHello("hi", "there")
+                end function
+
+                namespace person.roger
+                ' comment 1
+                ' comment 2
+
+                'comment 3
+                'comment 4
+                    function sayHello(text, text2)
+                    end function
+                end namespace
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 41)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text, text2)');
+        });
+        it('gets signature help for callfunc method', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    myNode@.sayHello(arg1)
+                end function
+            `);
+            program.setFile('components/MyNode.bs', `
+                function sayHello(text, text2)
+                end function
+            `);
+            program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                    <interface>
+                        <function name="sayHello"/>
+                    </interface>
+                </component>`);
+            program.validate();
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 36)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function sayHello(text, text2)');
+        });
+        it('does not get signature help for callfunc method, referenced by dot', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    myNode.sayHello(arg1)
+                end function
+            `);
+            program.setFile('components/MyNode.bs', `
+                function sayHello(text, text2)
+                end function
+            `);
+            program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                    <interface>
+                        <function name="sayHello"/>
+                    </interface>
+                </component>`);
+            program.validate();
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 36)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            //note - callfunc completions and signatures are not yet correctly identifying methods that are exposed in an interace - waiting on the new xml branch for that
+            (0, chai_1.expect)(signatureHelp).to.be.empty;
+        });
+        it('gets signature help for constructor with args', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p = new Person(arg1, arg2)
+                end function
+
+                class Person
+                    function new(arg1, arg2)
+                    end function
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 34)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('Person(arg1, arg2)');
+        });
+        it('gets signature help for constructor with args, defined in super class', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p = new Roger(arg1, arg2)
+                end function
+
+                class Person
+                    function new(arg1, arg2)
+                    end function
+                end class
+                class Roger extends Person
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 34)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('Roger(arg1, arg2)');
+        });
+        it('identifies arg index', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p = new Person(arg1, arg2)
+                end function
+
+                class Person
+                    function new(arg1, arg2)
+                    end function
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 34)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].index).to.equal(0);
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 40)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].index).to.equal(1);
+        });
+        it('gets signature help for namespaced constructor with args', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p = new people.coders.Person(arg1, arg2)
+                end function
+                namespace people.coders
+                    class Person
+                        function new(arg1, arg2)
+                        end function
+                    end class
+                end namespace
+                    `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 47)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('people.coders.Person(arg1, arg2)');
+            (0, chai_1.expect)(signatureHelp[0].index).to.equal(0);
+        });
+        it('gets signature help for regular method call', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    test(arg1, a2)
+                end function
+                function test(arg1, arg2)
+                end function
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 27)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function test(arg1, arg2)');
+            (0, chai_1.expect)(signatureHelp[0].index).to.equal(0);
+            signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 32)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function test(arg1, arg2)');
+            (0, chai_1.expect)(signatureHelp[0].index).to.equal(1);
+        });
+        it('gets signature help for dotted method call, with method in in-scope class', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    p.test(arg1)
+                end function
+                class Person
+                    function new(arg1, arg2)
+                    end function
+                    function test(arg)
+                    end function
+                end class
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 25)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function test(arg)');
+        });
+        it('gets signature help for namespaced method call', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    Person.test(arg1)
+                end function
+                namespace Person
+                    function test(arg)
+                    end function
+                end namespace
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 31)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function test(arg)');
+        });
+        it('gets signature help for namespaced method call', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    Person.roger.test(arg1)
+                end function
+                namespace Person.roger
+                    function test(arg)
+                    end function
+                end namespace
+            `);
+            let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, 38)));
+            (0, testHelpers_spec_1.expectZeroDiagnostics)(program);
+            (0, chai_1.expect)(signatureHelp[0].signature.label).to.equal('function test(arg)');
+        });
+        it('gets signature help for regular method call on various index points', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    test(a1, a2, a3)
+                end function
+                function test(arg1, arg2, arg3)
+                end function
+            `);
+            for (let col = 21; col < 27; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(0);
+            }
+            for (let col = 27; col < 31; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(1);
+            }
+            for (let col = 31; col < 35; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(2);
+            }
+        });
+        it('gets signature help for callfunc method call on various index points', () => {
+            program.setFile('components/MyNode.bs', `
+                function test(arg1, arg2, arg3)
+                end function
+            `);
+            program.setFile('source/main.bs', `
+                function main()
+                    thing@.test(a1, a2, a3)
+                end function
+            `);
+            program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+                <component name="Component1" extends="Scene">
+                    <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                    <interface>
+                        <function name="test"/>
+                    </interface>
+                </component>`);
+            program.validate();
+            for (let col = 29; col < 34; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(0);
+            }
+            for (let col = 34; col < 38; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(1);
+            }
+            for (let col = 38; col < 41; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(2);
+            }
+        });
+        it('gets signature help for constructor method call on various index points', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    a = new Person(a1, a2, a3)
+                end function
+                class Person
+                    function new(arg1, arg2, arg3)
+                    end function
+                end class
+            `);
+            for (let col = 29; col < 37; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(0);
+            }
+            for (let col = 37; col < 41; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(1);
+            }
+            for (let col = 41; col < 45; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(2);
+            }
+        });
+        it('gets signature help for partially typed line', () => {
+            program.setFile('source/main.bs', `
+                function main()
+                    thing@.test(a1, a2,
+                end function
+                function test(arg1, arg2, arg3)
+                end function
+                `);
+            program.setFile('components/MyNode.bs', `
+                function test(arg1, arg2, arg3)
+                end function
+                `);
+            program.setFile('components/MyNode.xml', (0, testHelpers_spec_1.trim) `<?xml version="1.0" encoding="utf-8" ?>
+            <component name="Component1" extends="Scene">
+                <script type="text/brightscript" uri="pkg:/components/MyNode.bs" />
+                <interface>
+                    <function name="test"/>
+                </interface>
+            </component>`);
+            program.validate();
+            for (let col = 28; col < 34; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(0);
+            }
+            for (let col = 35; col < 38; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(1);
+            }
+            for (let col = 38; col < 42; col++) {
+                let signatureHelp = (program.getSignatureHelp(`${rootDir}/source/main.bs`, vscode_languageserver_1.Position.create(2, col)));
+                (0, chai_1.expect)(signatureHelp, `failed on col ${col}`).to.have.lengthOf(1);
+                (0, chai_1.expect)(signatureHelp[0].index, `failed on col ${col}`).to.equal(2);
+            }
+        });
+    });
+    describe('plugins', () => {
+        it('emits file validation events', () => {
+            const plugin = {
+                name: 'test',
+                beforeFileValidate: sinon.spy(),
+                onFileValidate: sinon.spy(),
+                afterFileValidate: sinon.spy()
+            };
+            program.plugins.add(plugin);
+            program.setFile('source/main.brs', '');
+            program.validate();
+            (0, chai_1.expect)(plugin.beforeFileValidate.callCount).to.equal(1);
+            (0, chai_1.expect)(plugin.onFileValidate.callCount).to.equal(1);
+            (0, chai_1.expect)(plugin.afterFileValidate.callCount).to.equal(1);
+        });
+        it('emits file validation events', () => {
+            const plugin = {
+                name: 'test',
+                beforeFileValidate: sinon.spy(),
+                onFileValidate: sinon.spy(),
+                afterFileValidate: sinon.spy()
+            };
+            program.plugins.add(plugin);
+            program.setFile('components/main.xml', '');
+            program.validate();
+            (0, chai_1.expect)(plugin.beforeFileValidate.callCount).to.equal(1);
+            (0, chai_1.expect)(plugin.onFileValidate.callCount).to.equal(1);
+            (0, chai_1.expect)(plugin.afterFileValidate.callCount).to.equal(1);
+        });
+    });
+});
+//# sourceMappingURL=Program.spec.js.map
