@@ -12,7 +12,7 @@ export declare class XmlScope extends Scope {
      * Get the parent scope of this scope. If we could find the scope for our parentComponent, use that.
      * Otherwise default to global scope
      */
-    getParentScope(): any;
+    getParentScope(): Scope;
     protected _validate(callableContainerMap: CallableContainerMap): void;
     private diagnosticValidateInterface;
     private diagnosticMissingAttribute;
@@ -20,12 +20,12 @@ export declare class XmlScope extends Scope {
      * Detect when a child has imported a script that an ancestor also imported
      */
     private diagnosticDetectDuplicateAncestorScriptImports;
-    getAllFiles(): any;
+    getAllFiles(): BscFile[];
     /**
      * Get the list of files referenced by this scope that are actually loaded in the program.
      * This does not account for parent scope.
      */
-    getOwnFiles(): any;
+    getOwnFiles(): BscFile[];
     /**
      * Get the definition (where was this thing first defined) of the symbol under the position
      */

@@ -49,7 +49,7 @@ describe('SGParser', () => {
         (0, chai_1.expect)(ast.root).to.equal(ast.component);
         (0, testHelpers_spec_1.expectZeroDiagnostics)(file);
         const output = file.transpile();
-        (0, chai_1.expect)(output.code).to.equal((0, testHelpers_spec_1.trim) `
+        (0, chai_1.expect)(output.code.trimEnd()).to.equal((0, testHelpers_spec_1.trim) `
             <?xml version="1.0" encoding="utf-8" ?>
             <component name="ParentScene" extends="GrandparentScene">
                 <interface>

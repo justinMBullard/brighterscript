@@ -1612,7 +1612,7 @@ describe('BrsFile', () => {
                 ''
             ].join('\n'));
             //hover over sub ma|in()
-            (0, chai_1.expect)((await program.getHover(file.pathAbsolute, vscode_languageserver_1.Position.create(4, 22))).contents).to.equal((0, testHelpers_spec_1.trim) `
+            (0, chai_1.expect)((0, testHelpers_spec_1.trim)((await program.getHover(file.pathAbsolute, vscode_languageserver_1.Position.create(4, 22))).contents.toString())).to.equal((0, testHelpers_spec_1.trim) `
                 \`\`\`brightscript
                 sub main() as void
                 \`\`\`
@@ -2475,7 +2475,7 @@ describe('BrsFile', () => {
     describe('getTypedef', () => {
         function testTypedef(original, expected) {
             let file = program.setFile('source/main.brs', original);
-            (0, chai_1.expect)(file.getTypedef()).to.eql(expected);
+            (0, chai_1.expect)(file.getTypedef().trimEnd()).to.eql(expected);
         }
         it('includes namespace on extend class names', () => {
             testTypedef(`

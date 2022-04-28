@@ -44,4 +44,5 @@ __exportStar(require("./astUtils/stackedVisitor"), exports);
 __exportStar(require("./astUtils/reflection"), exports);
 __exportStar(require("./astUtils/creators"), exports);
 __exportStar(require("./astUtils/xml"), exports);
+__exportStar(require("./astUtils/AstEditor"), exports);
 //# sourceMappingURL=index.js.map

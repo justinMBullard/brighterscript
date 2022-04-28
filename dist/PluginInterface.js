@@ -50,6 +50,12 @@ class PluginInterface {
         }
         return plugin;
     }
+    /**
+     * Remove all plugins
+     */
+    clear() {
+        this.plugins = [];
+    }
 }
 exports.default = PluginInterface;
 //# sourceMappingURL=PluginInterface.js.map

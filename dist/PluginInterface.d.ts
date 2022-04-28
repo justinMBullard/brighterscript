@@ -19,4 +19,8 @@ export default class PluginInterface<T extends CompilerPlugin = CompilerPlugin> 
     add<T extends CompilerPlugin = CompilerPlugin>(plugin: T): T;
     has(plugin: CompilerPlugin): boolean;
     remove<T extends CompilerPlugin = CompilerPlugin>(plugin: T): T;
+    /**
+     * Remove all plugins
+     */
+    clear(): void;
 }

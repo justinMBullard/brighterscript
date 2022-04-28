@@ -51,7 +51,7 @@ export declare class XmlFile {
      *  - implied codebehind file
      *  - import statements from imported scripts or their descendents
      */
-    getAllDependencies(): any;
+    getAllDependencies(): string[];
     /**
      * List of all pkgPaths to scripts that this XmlFile depends on directly, regardless of whether they are loaded in the program or not.
      * This does not account for parent component scripts
@@ -60,7 +60,7 @@ export declare class XmlFile {
      *  - implied codebehind file
      *  - import statements from imported scripts or their descendents
      */
-    getOwnDependencies(): any;
+    getOwnDependencies(): string[];
     /**
      * List of all pkgPaths to scripts that this XmlFile depends on that are actually loaded into the program.
      * This does not account for parent component scripts.
@@ -69,7 +69,7 @@ export declare class XmlFile {
      *  - inferred codebehind file
      *  - import statements from imported scripts or their descendants
      */
-    getAvailableScriptImports(): any;
+    getAvailableScriptImports(): string[];
     getDiagnostics(): BsDiagnostic[];
     addDiagnostics(diagnostics: BsDiagnostic[]): void;
     /**
@@ -145,7 +145,7 @@ export declare class XmlFile {
      * Determines if this xml file has a reference to the specified file (or if it's itself)
      * @param file
      */
-    doesReferenceFile(file: File): any;
+    doesReferenceFile(file: File): boolean;
     /**
      * Get all available completions for the specified position
      * @param lineIndex
@@ -155,7 +155,7 @@ export declare class XmlFile {
     /**
      * Get the parent component (the component this component extends)
      */
-    get parentComponent(): any;
+    get parentComponent(): XmlFile;
     getHover(position: Position): Hover;
     getReferences(position: Position): Promise<Location[]>;
     getFunctionScopeAtPosition(position: Position, functionScopes?: FunctionScope[]): FunctionScope;

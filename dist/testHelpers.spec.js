@@ -9,51 +9,8 @@ const CodeActionUtil_1 = require("./CodeActionUtil");
 const util_1 = require("./util");
 const diagnosticUtils_1 = require("./diagnosticUtils");
 const thenby_1 = require("thenby");
-/**
- * Trim leading whitespace for every line (to make test writing cleaner
- */
-function trimLeading(text) {
-    var _a;
-    if (!text) {
-        return text;
-    }
-    const lines = text.split(/\r?\n/);
-    let minIndent = Number.MAX_SAFE_INTEGER;
-    //skip leading empty lines
-    while (((_a = lines[0]) === null || _a === void 0 ? void 0 : _a.trim().length) === 0) {
-        lines.splice(0, 1);
-    }
-    for (const line of lines) {
-        const trimmedLine = line.trimLeft();
-        //skip empty lines
-        if (trimmedLine.length === 0) {
-            continue;
-        }
-        const leadingSpaceCount = line.length - trimmedLine.length;
-        if (leadingSpaceCount < minIndent) {
-            minIndent = leadingSpaceCount;
-        }
-    }
-    //apply the trim to each line
-    for (let i = 0; i < lines.length; i++) {
-        lines[i] = lines[i].substring(minIndent);
-    }
-    return lines.join('\n');
-}
-/**
- * Remove leading white space and remove excess indentation
- */
-function trim(strings, ...args) {
-    let text = '';
-    for (let i = 0; i < strings.length; i++) {
-        text += strings[i];
-        if (args[i]) {
-            text += args[i];
-        }
-    }
-    return trimLeading(text);
-}
-exports.trim = trim;
+const undent_1 = require("undent");
+exports.trim = undent_1.default;
 function getDiagnostics(arg) {
     if (Array.isArray(arg)) {
         return arg;
@@ -150,7 +107,7 @@ exports.expectHasDiagnostics = expectHasDiagnostics;
  * Remove sourcemap information at the end of the source
  */
 function trimMap(source) {
-    return source.replace(/('|<!--)\/\/# sourceMappingURL=.*$/m, '');
+    return source.replace(/('|<!--)\/\/# sourceMappingURL=.*$/m, '').trimEnd();
 }
 exports.trimMap = trimMap;
 function expectCodeActions(test, expected) {
@@ -198,7 +155,6 @@ function getTestGetTypedef(scopeGetter) {
 exports.getTestGetTypedef = getTestGetTypedef;
 function getTestFileAction(action, scopeGetter) {
     return function testFileAction(source, expected, formatType = 'trim', pkgPath = 'source/main.bs', failOnDiagnostic = true) {
-        var _a;
         let [program, rootDir] = scopeGetter();
         expected = expected ? expected : source;
         let file = program.setFile({ src: (0, util_1.standardizePath) `${rootDir}/${pkgPath}`, dest: pkgPath }, source);
@@ -210,27 +166,7 @@ function getTestFileAction(action, scopeGetter) {
         let sources = [trimMap(codeWithMap.code), expected];
         for (let i = 0; i < sources.length; i++) {
             if (formatType === 'trim') {
-                let lines = sources[i].split('\n');
-                //throw out leading newlines
-                while (lines[0].length === 0) {
-                    lines.splice(0, 1);
-                }
-                let trimStartIndex = null;
-                for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-                    //if we don't have a starting trim count, compute it
-                    if (!trimStartIndex) {
-                        trimStartIndex = lines[lineIndex].length - lines[lineIndex].trim().length;
-                    }
-                    //only trim the expected file (since that's what we passed in from the test)
-                    if (lines[lineIndex].length > 0 && i === 1) {
-                        lines[lineIndex] = lines[lineIndex].substring(trimStartIndex);
-                    }
-                }
-                //trim trailing newlines
-                while (((_a = lines[lines.length - 1]) === null || _a === void 0 ? void 0 : _a.length) === 0) {
-                    lines.splice(lines.length - 1);
-                }
-                sources[i] = lines.join('\n');
+                sources[i] = (0, exports.trim)(sources[i]);
             }
         }
         (0, chai_1.expect)(sources[0]).to.equal(sources[1]);

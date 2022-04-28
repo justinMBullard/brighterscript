@@ -1106,7 +1106,8 @@ class Program {
                 outputPath: outputPath
             };
         });
-        this.plugins.emit('beforeProgramTranspile', this, entries);
+        const astEditor = new AstEditor_1.AstEditor();
+        this.plugins.emit('beforeProgramTranspile', this, entries, astEditor);
         const promises = entries.map(async (entry) => {
             //skip transpiling typedef files
             if ((0, reflection_1.isBrsFile)(entry.file) && entry.file.isTypedef) {
@@ -1134,7 +1135,8 @@ class Program {
             promises.push(util_1.util.copyBslibToStaging(stagingFolderPath));
         }
         await Promise.all(promises);
-        this.plugins.emit('afterProgramTranspile', this, entries);
+        this.plugins.emit('afterProgramTranspile', this, entries, astEditor);
+        astEditor.undoAll();
     }
     /**
      * Find a list of files in the program that have a function with the given name (case INsensitive)

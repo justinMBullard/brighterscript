@@ -1,11 +1,9 @@
 import type { CompletionItem, Diagnostic } from 'vscode-languageserver';
 import type { CodeActionShorthand } from './CodeActionUtil';
-import { BrsFile } from './files/BrsFile';
+import type { BrsFile } from './files/BrsFile';
 import type { Program } from './Program';
-/**
- * Remove leading white space and remove excess indentation
- */
-export declare function trim(strings: TemplateStringsArray, ...args: any[]): string;
+import undent from 'undent';
+export declare const trim: typeof undent;
 declare type DiagnosticCollection = {
     getDiagnostics(): Array<Diagnostic>;
 } | {

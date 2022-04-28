@@ -571,7 +571,7 @@ describe('XmlFile', () => {
                 stagingFolderPath: stagingDir,
                 logLevel: Logger_1.LogLevel.off
             });
-            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingDir}/components/MainScene.xml`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+            (0, chai_1.expect)((0, testHelpers_spec_1.trim)(fsExtra.readFileSync(`${stagingDir}/components/MainScene.xml`).toString())).to.eql((0, testHelpers_spec_1.trim) `
                 <?xml version="1.0" encoding="utf-8" ?>
                 <component name="MainScene" extends="Scene">
                     <script type="text/brightscript" uri="pkg:/source/bslib.brs" />
@@ -671,11 +671,11 @@ describe('XmlFile', () => {
                 </component>
             `;
             await program.transpile([], stagingDir);
-            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingDir}/components/SimpleScene.xml`).toString()).to.eql(expected);
+            (0, chai_1.expect)((0, testHelpers_spec_1.trim)(fsExtra.readFileSync(`${stagingDir}/components/SimpleScene.xml`).toString())).to.eql(expected);
             //clear the output folder
             fsExtra.emptyDirSync(stagingDir);
             await program.transpile([], stagingDir);
-            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingDir}/components/SimpleScene.xml`).toString()).to.eql(expected);
+            (0, chai_1.expect)((0, testHelpers_spec_1.trim)(fsExtra.readFileSync(`${stagingDir}/components/SimpleScene.xml`).toString())).to.eql(expected);
         });
         it('keeps all content of the XML', () => {
             program.setFile(`components/SimpleScene.bs`, `

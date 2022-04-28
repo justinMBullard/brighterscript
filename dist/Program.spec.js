@@ -1470,12 +1470,12 @@ describe('Program', () => {
                 end sub
             `);
             await program.transpile([], stagingFolderPath);
-            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.brs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.brs`).toString().trimEnd()).to.eql((0, testHelpers_spec_1.trim) `
                 'code comment
                 sub log(message)
                     print message
                 end sub`);
-            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.d.bs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/lib.d.bs`).toString().trimEnd()).to.eql((0, testHelpers_spec_1.trim) `
                 'typedef comment
                 sub log(message)
                 end sub
@@ -1536,6 +1536,37 @@ describe('Program', () => {
             //our literalExpression should have been restored to its original value
             (0, chai_1.expect)(literalExpression.token.text).to.eql('"hello world"');
         });
+        it('handles AstEditor for beforeProgramTranspile', async () => {
+            const file = program.setFile('source/main.bs', `
+                sub main()
+                    print "hello world"
+                end sub
+            `);
+            let literalExpression;
+            //replace all strings with "goodbye world"
+            program.plugins.add({
+                name: 'TestPlugin',
+                beforeProgramTranspile: (program, entries, editor) => {
+                    file.ast.walk((0, visitors_1.createVisitor)({
+                        LiteralExpression: (literal) => {
+                            literalExpression = literal;
+                            editor.setProperty(literal.token, 'text', '"goodbye world"');
+                        }
+                    }), {
+                        walkMode: visitors_1.WalkMode.visitExpressionsRecursive
+                    });
+                }
+            });
+            //transpile the file
+            await program.transpile([], stagingFolderPath);
+            //our changes should be there
+            (0, chai_1.expect)(fsExtra.readFileSync(`${stagingFolderPath}/source/main.brs`).toString()).to.eql((0, testHelpers_spec_1.trim) `
+                sub main()
+                    print "goodbye world"
+                end sub`);
+            //our literalExpression should have been restored to its original value
+            (0, chai_1.expect)(literalExpression.token.text).to.eql('"hello world"');
+        });
         it('copies bslib.brs when no ropm version was found', async () => {
             await program.transpile([], stagingFolderPath);
             (0, chai_1.expect)(fsExtra.pathExistsSync(`${stagingFolderPath}/source/bslib.brs`)).to.be.true;
@@ -1553,7 +1584,7 @@ describe('Program', () => {
                 end sub
             `);
             await program.transpile([], program.options.stagingFolderPath);
-            (0, chai_1.expect)((0, testHelpers_spec_1.trimMap)(fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/logger.brs`).toString()) + '\n').to.eql((0, testHelpers_spec_1.trim) `
+            (0, chai_1.expect)((0, testHelpers_spec_1.trimMap)(fsExtra.readFileSync((0, util_1.standardizePath) `${stagingFolderPath}/source/logger.brs`).toString())).to.eql((0, testHelpers_spec_1.trim) `
                 sub logInfo()
                     print 2
                 end sub

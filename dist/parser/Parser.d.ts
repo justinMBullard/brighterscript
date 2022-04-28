@@ -314,7 +314,7 @@ export declare class References {
     get interfaceStatementLookup(): Map<string, InterfaceStatement>;
     private _interfaceStatementLookup;
     enumStatements: EnumStatement[];
-    get enumStatementLookup(): any;
+    get enumStatementLookup(): Map<string, EnumStatement>;
     /**
      * A collection of full expressions. This excludes intermediary expressions.
      *

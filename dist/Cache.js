@@ -19,6 +19,12 @@ class Cache extends Map {
             return this.get(key);
         }
     }
+    /**
+     * Get the item with the specified key.
+     */
+    get(key) {
+        return super.get(key);
+    }
 }
 exports.Cache = Cache;
 //# sourceMappingURL=Cache.js.map

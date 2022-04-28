@@ -28,7 +28,7 @@ export declare class Scope {
      * If a namespace is declared as "NameA.NameB.NameC", there will be 3 entries in this dictionary,
      * "namea", "namea.nameb", "namea.nameb.namec"
      */
-    get namespaceLookup(): any;
+    get namespaceLookup(): Map<string, NamespaceContainer>;
     /**
      * Get the class with the specified name.
      * @param className - The class name, including the namespace of the class if possible
